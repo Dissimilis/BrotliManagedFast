@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Trusted publishing: nuget.org trusts this repository, this workflow file and this
+    # environment through GitHub's OIDC token, so there is no long-lived API key to store.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Restore
+      run: dotnet restore BrotliManagedFast.sln
+
+    - name: Build
+      run: dotnet build BrotliManagedFast.sln -c Release --no-restore
+
+    - name: Test
+      run: dotnet test src/BrotliManagedFast.Tests -c Release --no-build --blame-hang-timeout 300s
+
+    - name: Pack
+      run: |
+        dotnet pack src/BrotliManagedFast -c Release --no-build --output ./nupkgs
+        dotnet pack src/BrotliManagedFast.Cli -c Release --no-build --output ./nupkgs
+
+    - name: Check that both package versions are the release tag
+      run: |
+        set -e
+        tag="${{ github.event.release.tag_name }}"
+        case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "tag '$tag' is not vX.Y.Z"; exit 1;; esac
+        ls ./nupkgs/BrotliManagedFast.${tag#v}.nupkg
+        ls ./nupkgs/BrotliManagedFast.Cli.${tag#v}.nupkg
+
+    - name: Log in to nuget.org
+      id: login
+      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+      with:
+        user: Dissimilis
+
+    - name: Push to NuGet
+      run: dotnet nuget push ./nupkgs/*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate

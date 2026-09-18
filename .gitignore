@@ -1,0 +1,30 @@
+# Build output
+bin/
+obj/
+artifacts/
+BenchmarkDotNet.Artifacts/
+TestResults/
+*.nupkg
+*.snupkg
+
+# IDE and user files
+*.user
+*.suo
+*.swp
+*.DotSettings.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local-only material: notes, credentials, and every root-level dot-directory
+# except .github. Root-level markdown other than README is working notes.
+/docs/
+/keys/
+/.*/
+!/.github/
+/*.md
+!/README.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/THIRD-PARTY-NOTICES.md

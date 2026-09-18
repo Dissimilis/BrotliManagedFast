@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;netstandard2.0</TargetFrameworks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible Condition="'$(TargetFramework)' == 'net10.0'">true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>BrotliManagedFast</RootNamespace>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerMinimumMajorMinor>0.1</MinVerMinimumMajorMinor>
+
+    <!-- NuGet package metadata -->
+    <PackageId>BrotliManagedFast</PackageId>
+    <Title>Brotli compression for .NET (pure C#)</Title>
+    <Description>Brotli (RFC 7932) compression and decompression for .NET in pure managed C#: no native libraries, no P/Invoke, no dependencies on .NET 10. Runs on Blazor WebAssembly, Native AOT, Unity and everywhere else managed code runs. Full-format decoder plus the Large Window extension, raw prefix dictionaries, output and window limits, detailed error reporting, an encoder with qualities 0-11, streaming with flush, concatenable fragments, multi-threaded compression, and a BrotliStream shaped like System.IO.Compression.</Description>
+    <Authors>Marius Vitkevičius</Authors>
+    <Copyright>Copyright (c) 2026 Marius Vitkevičius</Copyright>
+    <PackageTags>brotli;compression;decompression;rfc7932;managed;wasm;blazor;aot;csharp;dotnet;stream;dictionary;large-window</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Dissimilis/BrotliManagedFast</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Dissimilis/BrotliManagedFast</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BrotliManagedFast.Tests" />
+    <InternalsVisibleTo Include="BrotliManagedFast.Benchmarks" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\img\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- netstandard2.0 needs the Span and ValueTask types from these packages; net10.0 has no dependencies. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" />
+  </ItemGroup>
+
+  <!-- Build-time only (PrivateAssets): the shipped net10.0 package has no dependencies. -->
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

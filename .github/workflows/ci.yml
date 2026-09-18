@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Restore
+      run: dotnet restore BrotliManagedFast.sln
+
+    - name: Build
+      run: dotnet build BrotliManagedFast.sln -c Release --no-restore
+
+    - name: Test
+      run: dotnet test src/BrotliManagedFast.Tests -c Release --no-build --blame-hang-timeout 300s
+
+    - name: Round-trip a file through the command-line tool
+      shell: bash
+      run: |
+        set -e
+        cli="src/BrotliManagedFast.Cli/bin/Release/net10.0/brotli-managed.dll"
+        dotnet "$cli" -q 6 -f -o "${{ runner.temp }}/sample.br" src/BrotliManagedFast.Tests/TestData/lcet10.txt
+        dotnet "$cli" -d -f -o "${{ runner.temp }}/sample.txt" "${{ runner.temp }}/sample.br"
+        cmp src/BrotliManagedFast.Tests/TestData/lcet10.txt "${{ runner.temp }}/sample.txt"
+
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Pack
+      run: dotnet pack src/BrotliManagedFast -c Release --output ./nupkgs
+
+    - name: Check package contents
+      run: |
+        set -e
+        pkg=$(ls ./nupkgs/BrotliManagedFast.*.nupkg | grep -v symbols)
+        unzip -l "$pkg"
+        for f in README.md icon.png lib/net10.0/BrotliManagedFast.dll lib/net10.0/BrotliManagedFast.xml lib/netstandard2.0/BrotliManagedFast.dll; do
+          unzip -l "$pkg" | grep -q " $f\$" || { echo "missing $f in package"; exit 1; }
+        done
+        # The net10.0 build must have no dependencies; netstandard2.0 needs System.Memory only.
+        unzip -p "$pkg" BrotliManagedFast.nuspec > nuspec.xml
+        python3 - <<'EOF'
+        import re, sys
+        text = open("nuspec.xml", encoding="utf-8").read()
+        groups = dict(re.findall(r'<group targetFramework="([^"]+)"\s*/?>(.*?)(?=<group |</dependencies>)', text, re.S))
+        net10 = next((v for k, v in groups.items() if k.startswith("net10")), "")
+        if "<dependency " in net10:
+            print("net10.0 package must have no dependencies"); sys.exit(1)
+        EOF
+
+  netstandard-consumer:
+    # The netstandard2.0 asset ships but nothing else here runs it. Consume the packed library from
+    # .NET Framework, where the polyfill packages it depends on actually matter.
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Pack, then compress and decompress from .NET Framework 4.8
+      shell: bash
+      run: |
+        set -e
+        dotnet pack src/BrotliManagedFast -c Release --output "$RUNNER_TEMP/feed"
+        pkg=$(ls "$RUNNER_TEMP"/feed/BrotliManagedFast.*.nupkg | head -1)
+        version=$(basename "$pkg" .nupkg)
+        version=${version#BrotliManagedFast.}
+        mkdir -p "$RUNNER_TEMP/ns20" && cd "$RUNNER_TEMP/ns20"
+        cat > ns20.csproj <<PROJ
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <OutputType>Exe</OutputType>
+            <TargetFramework>net48</TargetFramework>
+            <LangVersion>latest</LangVersion>
+          </PropertyGroup>
+          <ItemGroup>
+            <PackageReference Include="BrotliManagedFast" Version="$version" />
+          </ItemGroup>
+        </Project>
+        PROJ
+        cat > nuget.config <<CFG
+        <?xml version="1.0" encoding="utf-8"?>
+        <configuration>
+          <packageSources>
+            <add key="local" value="$RUNNER_TEMP/feed" />
+          </packageSources>
+        </configuration>
+        CFG
+        cat > Program.cs <<'PROG'
+        using System;
+        using System.IO;
+        using BrotliManagedFast;
+
+        static class Program
+        {
+            static int Main()
+            {
+                var data = new byte[250000];
+                for (int i = 0; i < data.Length; i++) data[i] = (byte)((i % 251) ^ (i / 997));
+                byte[] c = BrotliEncoder.Compress(data, new BrotliCompressionOptions { Quality = 9 });
+                byte[] back = BrotliDecoder.Decompress(c);
+                for (int i = 0; i < data.Length; i++)
+                    if (data[i] != back[i]) { Console.Error.WriteLine("roundtrip mismatch"); return 1; }
+                using (var ms = new MemoryStream())
+                {
+                    using (var s = new BrotliStream(ms, new BrotliCompressionOptions { Quality = 5 }, true))
+                        s.Write(data, 0, data.Length);
+                    Console.WriteLine("ok: " + data.Length + " -> " + c.Length + ", stream " + ms.Length);
+                }
+                return 0;
+            }
+        }
+        PROG
+        dotnet build -c Release
+        ./bin/Release/net48/ns20.exe
+
+  native-aot:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        filter: tree:0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        global-json-file: global.json
+        cache: false
+
+    - name: Publish a NativeAOT app that compresses and decompresses
+      run: |
+        set -e
+        mkdir -p /tmp/aot && cd /tmp/aot
+        dotnet new console -n AotSmoke -o . --force > /dev/null
+        dotnet add AotSmoke.csproj reference "$GITHUB_WORKSPACE/src/BrotliManagedFast/BrotliManagedFast.csproj" > /dev/null
+        cat > Program.cs <<'EOF'
+        using BrotliManagedFast;
+        var data = new byte[200_000];
+        for (int i = 0; i < data.Length; i++) data[i] = (byte)(i % 251 ^ (i / 1000));
+        byte[] compressed = BrotliEncoder.Compress(data, new BrotliCompressionOptions { Quality = 6 });
+        byte[] back = BrotliDecoder.Decompress(compressed);
+        if (!data.AsSpan().SequenceEqual(back)) { Console.Error.WriteLine("roundtrip mismatch"); return 1; }
+        Console.WriteLine($"ok: {data.Length} -> {compressed.Length} bytes");
+        return 0;
+        EOF
+        sed -i 's#<PropertyGroup>#<PropertyGroup><PublishAot>true</PublishAot><InvariantGlobalization>true</InvariantGlobalization>#' AotSmoke.csproj
+        dotnet publish -c Release -r linux-x64 -o out
+        ./out/AotSmoke
+        test ! -e out/BrotliManagedFast.dll

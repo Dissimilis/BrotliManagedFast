@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+*.slnx text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.br binary
+# Reference test vectors must be byte-exact; never normalise them.
+src/BrotliManagedFast.Tests/TestData/** binary

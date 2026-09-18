@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>brotli-managed</AssemblyName>
+    <RootNamespace>BrotliManagedFast.Cli</RootNamespace>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>brotli-managed</ToolCommandName>
+    <PackageId>BrotliManagedFast.Cli</PackageId>
+    <Description>Command-line Brotli compressor and decompressor built on BrotliManagedFast (pure managed, no native code).</Description>
+    <Authors>Marius Vitkevičius</Authors>
+    <Copyright>Copyright (c) 2026 Marius Vitkevičius</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Dissimilis/BrotliManagedFast</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Dissimilis/BrotliManagedFast</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>brotli;compression;cli;dotnet-tool;rfc7932</PackageTags>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerMinimumMajorMinor>0.1</MinVerMinimumMajorMinor>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\img\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrotliManagedFast\BrotliManagedFast.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
