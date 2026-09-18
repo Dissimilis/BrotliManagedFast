@@ -26,6 +26,8 @@ Decompression is faster than native in most of those cases, by the widest margin
 
 Compression is smaller than native's at quality 1 on every file, on the text files at quality 4, and on four of the five at quality 11. Quality 9 is the one that is also faster than native. The rest buy their density with time. Quality 4 is the default; 9 is the dense end of the fast range and 11 the smallest output.
 
+On ARM64 the margins narrow: decompression trails native slightly on text and still leads on the map tile, and compression keeps its quality-9 lead.
+
 The [Building](#building) section has the command to reproduce all of it on your own hardware.
 
 ## Installation
