@@ -684,6 +684,58 @@ public class PublicApiContractTests
     }
 
     [Fact]
+    public void TheLargeWindowFlagWithAnOrdinaryWindowStaysReadableByTheNativeDecoder()
+    {
+        // Asking for Large Window support but staying within the RFC's window must not emit the extended
+        // header, or every ordinary decoder would reject the stream.
+        byte[] data = Sample(50_000, seed: 27);
+        byte[] compressed = BrotliEncoder.Compress(data, new BrotliCompressionOptions { Quality = 4, WindowLog = 22, LargeWindow = true });
+        Assert.Equal(data, EncoderRoundtripTests.NativeDecompress(compressed, data.Length));
+    }
+
+    [Fact]
+    public void FlushingAfterTheFinalBlockWritesNothing()
+    {
+        // The last-block bit is already out; a flush that emitted anything here would append bytes that a
+        // conforming decoder must treat as trailing rubbish.
+        byte[] data = Sample(30_000, seed: 28);
+        var encoder = new BrotliEncoder(new BrotliCompressionOptions { Quality = 5 });
+        var destination = new byte[BrotliEncoder.GetMaxCompressedLength(data.Length)];
+        Assert.Equal(OperationStatus.Done, encoder.Compress(data, destination, out _, out int written, isFinalBlock: true));
+        Assert.Equal(OperationStatus.Done, encoder.Flush(destination.AsSpan(written), out int afterFinal));
+        encoder.Dispose();
+
+        Assert.Equal(0, afterFinal);
+        Assert.Equal(data, EncoderRoundtripTests.NativeDecompress(destination.AsSpan(0, written).ToArray(), data.Length));
+    }
+
+    [Fact]
+    public void AShorterDictionaryFailsCleanlyInsteadOfReadingPastItsEnd()
+    {
+        // The encoder's matches point into a 4 KiB dictionary; the decoder is given only its first kilobyte.
+        var dictionaryBytes = new byte[4096];
+        new Random(29).NextBytes(dictionaryBytes);
+        var data = new byte[20_000];
+        for (int i = 0; i < data.Length; i++) data[i] = dictionaryBytes[i % dictionaryBytes.Length];
+
+        byte[] compressed = BrotliEncoder.Compress(data, new BrotliCompressionOptions
+        {
+            Quality = 9,
+            Dictionary = BrotliDictionary.Create(dictionaryBytes),
+        });
+
+        var truncated = BrotliDictionary.Create(dictionaryBytes.AsSpan(0, 1024));
+        var buffer = new byte[data.Length];
+        using var decoder = new BrotliDecoder(new BrotliDecompressionOptions { MaxOutputLength = data.Length, Dictionary = truncated });
+        OperationStatus status = decoder.Decompress(compressed, buffer, out _, out int written, isFinalBlock: true);
+
+        // A typed failure is the contract; reading past the short dictionary would be a memory-safety bug.
+        Assert.Equal(OperationStatus.InvalidData, status);
+        Assert.Equal(BrotliDecoderError.Dictionary, decoder.LastError);
+        Assert.Equal(0, written);
+    }
+
+    [Fact]
     public void DisposingTwiceIsHarmless()
     {
         var encoder = new BrotliEncoder(new BrotliCompressionOptions());
