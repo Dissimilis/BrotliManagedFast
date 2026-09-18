@@ -222,8 +222,11 @@ internal sealed class DecoderCore
         private static void Grow<T>(ref T[] array, int needed, ref bool rented)
         {
             if (array.Length >= needed) return;
+            // Rent before returning: if the rent throws, the field must not already reference an array that
+            // has been handed back, or disposal would return it a second time and two owners would share it.
+            T[] replacement = ArrayPool<T>.Shared.Rent(needed);
             if (rented) ArrayPool<T>.Shared.Return(array);
-            array = ArrayPool<T>.Shared.Rent(needed);
+            array = replacement;
             rented = true;
         }
 
@@ -1421,8 +1424,9 @@ internal sealed class DecoderCore
                 _contextIndex = 0;
                 if (contextMap.Length < contextMapSize)
                 {
+                    byte[] replacement = ArrayPool<byte>.Shared.Rent(contextMapSize);
                     if (rented) ArrayPool<byte>.Shared.Return(contextMap);
-                    contextMap = ArrayPool<byte>.Shared.Rent(contextMapSize);
+                    contextMap = replacement;
                     rented = true;
                 }
                 if (numHtrees <= 1)
@@ -2656,6 +2660,7 @@ internal sealed class DecoderCore
             if (accBits < 16)
             {
                 ulong v = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, inPos));
+                if (!BitConverter.IsLittleEndian) v = BinaryPrimitives.ReverseEndianness(v);
                 int bytes = (63 - accBits) >> 3;
                 acc |= (v & ((1UL << (bytes << 3)) - 1)) << accBits;
                 accBits += bytes << 3;
@@ -2698,6 +2703,7 @@ internal sealed class DecoderCore
             if (accBits < 16)
             {
                 ulong v = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, inPos));
+                if (!BitConverter.IsLittleEndian) v = BinaryPrimitives.ReverseEndianness(v);
                 int bytes = (63 - accBits) >> 3;
                 acc |= (v & ((1UL << (bytes << 3)) - 1)) << accBits;
                 accBits += bytes << 3;

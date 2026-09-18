@@ -188,133 +188,143 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
 
     public EncoderCore(BrotliCompressionOptions options)
     {
-        options.Validate();
-        _options = options;
-        _q = QualityParams.For(options.Quality);
-        _quality = options.Quality;
-        // Only the four cached distances, and only from quality 5. The reference also tries each one give or
-        // take 1, 2 and 3 at the higher qualities, measured here as a further 100 bytes on the corpus and 692 on
-        // a JSON sample for about half as much encode time again. Quality 3 keeps two positions per bucket, so
-        // four extra probes nearly double its search for a gain it does not need.
-        _numDistCandidates = _q.UseBuckets && options.Quality >= 5 ? 4 : 0;
-        PrepareDistanceCandidates();
-        _sizeHint = options.SizeHint;
-        _largeWindow = options.LargeWindow && options.WindowLog > Constants.MaxWindowBits;
-        int wbits = options.WindowLog;
-        if (options.SizeHint > 0 && !_largeWindow && !options.Concatenable)
+        // Several pooled buffers are acquired below. If any acquisition fails, hand back the ones
+        // already taken: the caller never receives the instance, so nothing else can dispose it.
+        try
         {
-            // Shrink the window to the smallest that still covers the whole input (not in concatenable mode: all fragments must agree).
-            int needed = Constants.MinWindowBits;
-            while (needed < wbits && (1L << needed) - Constants.WindowGap < options.SizeHint) needed++;
-            wbits = needed;
-        }
-        _windowBits = wbits;
-        int blockBits = Math.Min(_q.BlockBits, Math.Max(Constants.MinWindowBits, _windowBits));
-        _blockSize = 1 << blockBits;
-        _maxBackward = (int)Math.Min((1L << _windowBits) - Constants.WindowGap, int.MaxValue / 2);
-        // Largest distance the distance alphabet can express with these parameters. Ordinary matches are
-        // bounded by the window and stay well under it, but a prefix dictionary sits beyond the window, so a
-        // long one can reach distances that have no symbol.
-        _maxCodableDistance = DistanceParams.Create(0, 0, _largeWindow).MaxDistance;
-        _concatenable = options.Concatenable;
-        _pool = options.Pool ?? ArrayPool<byte>.Shared;
-        // Sized so a compressed block never grows the storage; the pool hands back dirty memory, which the
-        // writer tolerates (every store zeroes the bytes ahead of the write position).
-        _writer = new BitWriter(_pool, _blockSize + (_blockSize >> 2) + 1024);
-
-        _dictLength = options.Dictionary?.Length ?? 0;
-        long windowBytes = Math.Min(1L << _windowBits, 1L << 24);
-        long cap = _dictLength + windowBytes + _blockSize * 2L + 64;
-        _buf = _pool.Rent((int)Math.Min(cap, int.MaxValue - 64));
-        if (_dictLength > 0)
-        {
-            options.Dictionary!.Span.CopyTo(_buf);
-        }
-        _bufLen = _dictLength;
-        _bufBase = -_dictLength;
-        _streamPos = 0;
-        _inputEnd = 0;
-        _matchStart = -_dictLength;
-
-        if (_q.UseBuckets)
-        {
-            _head = Array.Empty<int>();
-            _hashShift = 32 - _q.BucketBits;
-            _slotBits = _q.SlotBits;
-            _slotMask = (1 << _q.SlotBits) - 1;
-            _buckets = ArrayPool<int>.Shared.Rent(1 << (_q.BucketBits + _q.SlotBits));   // contents never read past _bucketNum
-            _bucketNum = ArrayPool<ushort>.Shared.Rent(1 << _q.BucketBits);
-            Array.Clear(_bucketNum, 0, 1 << _q.BucketBits);
-        }
-        else
-        {
-            _hashShift = 32 - _q.HashBits;
-            // Rented (not zeroed) and filled once; a fresh array would be zeroed and then filled.
-            _head = ArrayPool<int>.Shared.Rent(1 << _q.HashBits);
-            _head.AsSpan(0, 1 << _q.HashBits).Fill(int.MinValue);
-            _buckets = Array.Empty<int>();
-            _bucketNum = Array.Empty<ushort>();
-        }
-        _commands = ArrayPool<Command>.Shared.Rent((_blockSize >> 2) + 16);
-        if (_q.Zopfli)
-        {
-            // The match tree covers the window, or the announced input when that is smaller (a concatenable
-            // fragment keeps the window of the whole stream but only ever matches inside itself).
-            int treeBits = _windowBits;
-            if (options.SizeHint > 0)
+            options.Validate();
+            _options = options;
+            _q = QualityParams.For(options.Quality);
+            _quality = options.Quality;
+            // Only the four cached distances, and only from quality 5. The reference also tries each one give or
+            // take 1, 2 and 3 at the higher qualities, measured here as a further 100 bytes on the corpus and 692 on
+            // a JSON sample for about half as much encode time again. Quality 3 keeps two positions per bucket, so
+            // four extra probes nearly double its search for a gain it does not need.
+            _numDistCandidates = _q.UseBuckets && options.Quality >= 5 ? 4 : 0;
+            PrepareDistanceCandidates();
+            _sizeHint = options.SizeHint;
+            _largeWindow = options.LargeWindow && options.WindowLog > Constants.MaxWindowBits;
+            int wbits = options.WindowLog;
+            if (options.SizeHint > 0 && !_largeWindow && !options.Concatenable)
             {
-                long positions = options.SizeHint + _dictLength;
-                int hintBits = Constants.MinWindowBits;
-                while (hintBits < treeBits && (1L << hintBits) < positions) hintBits++;
-                treeBits = hintBits;
+                // Shrink the window to the smallest that still covers the whole input (not in concatenable mode: all fragments must agree).
+                int needed = Constants.MinWindowBits;
+                while (needed < wbits && (1L << needed) - Constants.WindowGap < options.SizeHint) needed++;
+                wbits = needed;
             }
-            _zopfli = new ZopfliParser(treeBits, Constants.DistanceAlphabetSize(0, 0, _largeWindow ? Constants.LargeMaxDistanceBits : Constants.MaxDistanceBits),
-                DistanceParams.Create(0, 0, _largeWindow).MaxDistance, _q.ZopfliLen, _q.ZopfliCandidates, _q.ZopfliPasses);
-            _mb = new MetaBlockSplit();
-        }
-        else if (options.Quality >= 8)
-        {
-            // One-pass block splitting, at the dense end of the fast tier only. It buys 0.2 to 1.6 percent at
-            // every quality but costs 13 to 87 percent of the encode time, which is worth paying only where
-            // there is time to spare: qualities 8 and 9 run at a fifth to a half of the native encoder's time,
-            // while quality 4, the default, is already at parity with it and ahead of it on ratio.
-            _greedyMb = new MetaBlockSplit();
-        }
-        // Make the prefix dictionary findable: the most recent dictionary position per hash.
-        _dictHead = Array.Empty<int>();
-        _dictBuckets = Array.Empty<int>();
-        _dictBucketNum = Array.Empty<ushort>();
-        if (_dictLength >= MinMatch)
-        {
-            // Only the tail of the dictionary is reachable: a match there is coded as a backward distance, and
-            // distances above what the alphabet can express have no symbol. A longer dictionary keeps working,
-            // its unreachable head simply never matches, which is what the reference does by keeping only the
-            // last window's worth.
-            long firstIndexable = -Math.Min(_dictLength, Math.Max(0, _maxCodableDistance - _maxBackward));
+            _windowBits = wbits;
+            int blockBits = Math.Min(_q.BlockBits, Math.Max(Constants.MinWindowBits, _windowBits));
+            _blockSize = 1 << blockBits;
+            _maxBackward = (int)Math.Min((1L << _windowBits) - Constants.WindowGap, int.MaxValue / 2);
+            // Largest distance the distance alphabet can express with these parameters. Ordinary matches are
+            // bounded by the window and stay well under it, but a prefix dictionary sits beyond the window, so a
+            // long one can reach distances that have no symbol.
+            _maxCodableDistance = DistanceParams.Create(0, 0, _largeWindow).MaxDistance;
+            _concatenable = options.Concatenable;
+            _pool = options.Pool ?? ArrayPool<byte>.Shared;
+            // Sized so a compressed block never grows the storage; the pool hands back dirty memory, which the
+            // writer tolerates (every store zeroes the bytes ahead of the write position).
+            _writer = new BitWriter(_pool, _blockSize + (_blockSize >> 2) + 1024);
+
+            _dictLength = options.Dictionary?.Length ?? 0;
+            long windowBytes = Math.Min(1L << _windowBits, 1L << 24);
+            long cap = _dictLength + windowBytes + _blockSize * 2L + 64;
+            _buf = _pool.Rent((int)Math.Min(cap, int.MaxValue - 64));
+            if (_dictLength > 0)
+            {
+                options.Dictionary!.Span.CopyTo(_buf);
+            }
+            _bufLen = _dictLength;
+            _bufBase = -_dictLength;
+            _streamPos = 0;
+            _inputEnd = 0;
+            _matchStart = -_dictLength;
+
             if (_q.UseBuckets)
             {
-                _dictBuckets = new int[_buckets.Length];
-                _dictBucketNum = new ushort[1 << _q.BucketBits];
-                for (long p = firstIndexable; p <= -MinMatch; p++)
-                {
-                    int h = (int)(Hash4(_buf, Index(p)) >> _hashShift);
-                    ushort n = _dictBucketNum[h];
-                    _dictBuckets[(h << _slotBits) + (n & _slotMask)] = (int)p;
-                    _dictBucketNum[h] = (ushort)(n + 1);
-                }
+                _head = Array.Empty<int>();
+                _hashShift = 32 - _q.BucketBits;
+                _slotBits = _q.SlotBits;
+                _slotMask = (1 << _q.SlotBits) - 1;
+                _buckets = ArrayPool<int>.Shared.Rent(1 << (_q.BucketBits + _q.SlotBits));   // contents never read past _bucketNum
+                _bucketNum = ArrayPool<ushort>.Shared.Rent(1 << _q.BucketBits);
+                Array.Clear(_bucketNum, 0, 1 << _q.BucketBits);
             }
             else
             {
-                _dictHead = new int[1 << _q.HashBits];
-                for (int k = 0; k < _dictHead.Length; k++) _dictHead[k] = int.MinValue;
-                ref byte dictRef = ref MemoryMarshal.GetReference(_buf.AsSpan());
-                int shift64 = 64 - _q.HashBits;
-                for (long p = firstIndexable; p <= -MinMatch; p++)
+                _hashShift = 32 - _q.HashBits;
+                // Rented (not zeroed) and filled once; a fresh array would be zeroed and then filled.
+                _head = ArrayPool<int>.Shared.Rent(1 << _q.HashBits);
+                _head.AsSpan(0, 1 << _q.HashBits).Fill(int.MinValue);
+                _buckets = Array.Empty<int>();
+                _bucketNum = Array.Empty<ushort>();
+            }
+            _commands = ArrayPool<Command>.Shared.Rent((_blockSize >> 2) + 16);
+            if (_q.Zopfli)
+            {
+                // The match tree covers the window, or the announced input when that is smaller (a concatenable
+                // fragment keeps the window of the whole stream but only ever matches inside itself).
+                int treeBits = _windowBits;
+                if (options.SizeHint > 0)
                 {
-                    ulong w = WordAt(ref dictRef, Index(p), _dictLength);
-                    _dictHead[_q.Quick ? HashQuick(w, shift64) : HashGreedy(w, shift64)] = (int)p;
+                    long positions = options.SizeHint + _dictLength;
+                    int hintBits = Constants.MinWindowBits;
+                    while (hintBits < treeBits && (1L << hintBits) < positions) hintBits++;
+                    treeBits = hintBits;
+                }
+                _zopfli = new ZopfliParser(treeBits, Constants.DistanceAlphabetSize(0, 0, _largeWindow ? Constants.LargeMaxDistanceBits : Constants.MaxDistanceBits),
+                    DistanceParams.Create(0, 0, _largeWindow).MaxDistance, _q.ZopfliLen, _q.ZopfliCandidates, _q.ZopfliPasses);
+                _mb = new MetaBlockSplit();
+            }
+            else if (options.Quality >= 8)
+            {
+                // One-pass block splitting, at the dense end of the fast tier only. It buys 0.2 to 1.6 percent at
+                // every quality but costs 13 to 87 percent of the encode time, which is worth paying only where
+                // there is time to spare: qualities 8 and 9 run at a fifth to a half of the native encoder's time,
+                // while quality 4, the default, is already at parity with it and ahead of it on ratio.
+                _greedyMb = new MetaBlockSplit();
+            }
+            // Make the prefix dictionary findable: the most recent dictionary position per hash.
+            _dictHead = Array.Empty<int>();
+            _dictBuckets = Array.Empty<int>();
+            _dictBucketNum = Array.Empty<ushort>();
+            if (_dictLength >= MinMatch)
+            {
+                // Only the tail of the dictionary is reachable: a match there is coded as a backward distance, and
+                // distances above what the alphabet can express have no symbol. A longer dictionary keeps working,
+                // its unreachable head simply never matches, which is what the reference does by keeping only the
+                // last window's worth.
+                long firstIndexable = -Math.Min(_dictLength, Math.Max(0, _maxCodableDistance - _maxBackward));
+                if (_q.UseBuckets)
+                {
+                    _dictBuckets = new int[_buckets.Length];
+                    _dictBucketNum = new ushort[1 << _q.BucketBits];
+                    for (long p = firstIndexable; p <= -MinMatch; p++)
+                    {
+                        int h = (int)(Hash4(_buf, Index(p)) >> _hashShift);
+                        ushort n = _dictBucketNum[h];
+                        _dictBuckets[(h << _slotBits) + (n & _slotMask)] = (int)p;
+                        _dictBucketNum[h] = (ushort)(n + 1);
+                    }
+                }
+                else
+                {
+                    _dictHead = new int[1 << _q.HashBits];
+                    for (int k = 0; k < _dictHead.Length; k++) _dictHead[k] = int.MinValue;
+                    ref byte dictRef = ref MemoryMarshal.GetReference(_buf.AsSpan());
+                    int shift64 = 64 - _q.HashBits;
+                    for (long p = firstIndexable; p <= -MinMatch; p++)
+                    {
+                        ulong w = WordAt(ref dictRef, Index(p), _dictLength);
+                        _dictHead[_q.Quick ? HashQuick(w, shift64) : HashGreedy(w, shift64)] = (int)p;
+                    }
                 }
             }
+        }
+        catch
+        {
+            Dispose();
+            throw;
         }
     }
 
@@ -324,33 +334,35 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
 
     public void Dispose()
     {
+        // This also runs from the constructor when an allocation fails part way, so every field here has to be
+        // treated as possibly unset.
         _zopfli?.ReleaseBuffers();
-        if (_buf.Length != 0)
+        if (_buf is { Length: not 0 })
         {
-            _pool.Return(_buf);
+            (_pool ?? ArrayPool<byte>.Shared).Return(_buf);
             _buf = Array.Empty<byte>();
         }
-        if (_commands.Length != 0)
+        if (_commands is { Length: not 0 })
         {
             ArrayPool<Command>.Shared.Return(_commands);
             _commands = Array.Empty<Command>();
         }
-        if (_buckets.Length != 0)
+        if (_buckets is { Length: not 0 })
         {
             ArrayPool<int>.Shared.Return(_buckets);
             _buckets = Array.Empty<int>();
         }
-        if (_bucketNum.Length != 0)
+        if (_bucketNum is { Length: not 0 })
         {
             ArrayPool<ushort>.Shared.Return(_bucketNum);
             _bucketNum = Array.Empty<ushort>();
         }
-        if (_head.Length != 0)
+        if (_head is { Length: not 0 })
         {
             ArrayPool<int>.Shared.Return(_head);
             _head = Array.Empty<int>();
         }
-        _writer.Dispose();
+        _writer?.Dispose();
     }
 
     // ------------------------------------------------------------------ public streaming API

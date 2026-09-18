@@ -201,6 +201,8 @@ internal ref struct BitReader
     {
         if (_accBits > 56) return;
         ulong v = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref MemoryMarshal.GetReference(_input), _pos));
+        // The accumulator is little-endian by definition of the format; the test folds away at jit time.
+        if (!BitConverter.IsLittleEndian) v = BinaryPrimitives.ReverseEndianness(v);
         int bytes = (63 - _accBits) >> 3;
         _acc |= (v & ((1UL << (bytes << 3)) - 1)) << _accBits;
         _accBits += bytes << 3;
