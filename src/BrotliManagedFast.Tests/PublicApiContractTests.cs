@@ -832,6 +832,28 @@ public class PublicApiContractTests
     }
 
     [Fact]
+    public void ADictionaryLongerThanTheAddressableRangeStillWorks()
+    {
+        // Matches are coded as backward distances, and a distance above what the alphabet can express has no
+        // symbol. A 64 MiB dictionary used to make the fast qualities emit an undecodable stream, and quality 8
+        // throw while building its histogram. Its unreachable head is now simply never matched.
+        const int dictionaryLength = (1 << 26) + 1024;
+        var dictionaryBytes = new byte[dictionaryLength];
+        for (int i = 0; i < 64; i++) dictionaryBytes[i] = (byte)(i + 1);
+        var dictionary = BrotliDictionary.Create(dictionaryBytes);
+
+        var data = new byte[64];
+        for (int i = 0; i < data.Length; i++) data[i] = (byte)(i + 1);
+
+        foreach (int quality in new[] { 0, 2, 4, 8, 11 })
+        {
+            byte[] compressed = BrotliEncoder.Compress(data, new BrotliCompressionOptions { Quality = quality, Dictionary = dictionary });
+            byte[] back = BrotliDecoder.Decompress(compressed, new BrotliDecompressionOptions { MaxOutputLength = 256, Dictionary = dictionary });
+            Assert.True(data.AsSpan().SequenceEqual(back), $"quality {quality} did not round-trip with a dictionary larger than the addressable range");
+        }
+    }
+
+    [Fact]
     public void DisposingTwiceIsHarmless()
     {
         var encoder = new BrotliEncoder(new BrotliCompressionOptions());

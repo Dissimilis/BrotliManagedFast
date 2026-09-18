@@ -111,6 +111,7 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
     private readonly QualityParams _q;
     private readonly int _windowBits;
     private readonly bool _largeWindow;
+    private readonly long _maxCodableDistance;
     private readonly int _blockSize;
     private readonly int _maxBackward;
     private readonly bool _concatenable;
@@ -211,6 +212,10 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
         int blockBits = Math.Min(_q.BlockBits, Math.Max(Constants.MinWindowBits, _windowBits));
         _blockSize = 1 << blockBits;
         _maxBackward = (int)Math.Min((1L << _windowBits) - Constants.WindowGap, int.MaxValue / 2);
+        // Largest distance the distance alphabet can express with these parameters. Ordinary matches are
+        // bounded by the window and stay well under it, but a prefix dictionary sits beyond the window, so a
+        // long one can reach distances that have no symbol.
+        _maxCodableDistance = DistanceParams.Create(0, 0, _largeWindow).MaxDistance;
         _concatenable = options.Concatenable;
         _pool = options.Pool ?? ArrayPool<byte>.Shared;
         // Sized so a compressed block never grows the storage; the pool hands back dirty memory, which the
@@ -281,11 +286,16 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
         _dictBucketNum = Array.Empty<ushort>();
         if (_dictLength >= MinMatch)
         {
+            // Only the tail of the dictionary is reachable: a match there is coded as a backward distance, and
+            // distances above what the alphabet can express have no symbol. A longer dictionary keeps working,
+            // its unreachable head simply never matches, which is what the reference does by keeping only the
+            // last window's worth.
+            long firstIndexable = -Math.Min(_dictLength, Math.Max(0, _maxCodableDistance - _maxBackward));
             if (_q.UseBuckets)
             {
                 _dictBuckets = new int[_buckets.Length];
                 _dictBucketNum = new ushort[1 << _q.BucketBits];
-                for (long p = -_dictLength; p <= -MinMatch; p++)
+                for (long p = firstIndexable; p <= -MinMatch; p++)
                 {
                     int h = (int)(Hash4(_buf, Index(p)) >> _hashShift);
                     ushort n = _dictBucketNum[h];
@@ -299,7 +309,7 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
                 for (int k = 0; k < _dictHead.Length; k++) _dictHead[k] = int.MinValue;
                 ref byte dictRef = ref MemoryMarshal.GetReference(_buf.AsSpan());
                 int shift64 = 64 - _q.HashBits;
-                for (long p = -_dictLength; p <= -MinMatch; p++)
+                for (long p = firstIndexable; p <= -MinMatch; p++)
                 {
                     ulong w = WordAt(ref dictRef, Index(p), _dictLength);
                     _dictHead[_q.Quick ? HashQuick(w, shift64) : HashGreedy(w, shift64)] = (int)p;
@@ -614,7 +624,8 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
                 if (haveDict)
                 {
                     int dc = _dictHead[h];
-                    if (dc != int.MinValue && Index(dc) >= 0 && Read32(buf, Index(dc)) == cur)
+                    if (dc != int.MinValue && Index(dc) >= 0 && Read32(buf, Index(dc)) == cur
+                        && DistanceFor(pos, dc) is > 0 and var dd && dd <= _maxCodableDistance)
                     {
                         c = dc;
                         ci = Index(dc);
@@ -889,7 +900,7 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
             if (buf[ci + bestLen] != buf[idx + bestLen]) continue;
             int len = MinMatch + CommonLength(ci + MinMatch, idx + MinMatch, dictMax - MinMatch);
             int distance = DistanceFor(vpos, cand);
-            if (distance <= 0 || distance > Constants.MaxAllowedDistance) continue;
+            if (distance <= 0 || distance > _maxCodableDistance) continue;
             int score = Score(len, distance);
             if (score > bestScore)
             {
@@ -1265,6 +1276,7 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
         int len = CommonLength(ci, idx, maxLen);
         if (len < MinMatch) return;
         int distance = DistanceFor(vpos, dc);
+        if (distance <= 0 || distance > _maxCodableDistance) return;
         int score = Score(len, distance);
         if (score > MinScore)
         {
