@@ -155,8 +155,10 @@ public sealed class BrotliStream : Stream
             total += written;
             if (status == OperationStatus.Done)
             {
-                _decoderDone = true;
+                // Check first: if the probe read throws or is cancelled, the stream must not already look
+                // finished, or the next call would report a clean end without ever looking for a trailer.
                 CheckForTrailingData();
+                _decoderDone = true;
                 break;
             }
             if (status == OperationStatus.InvalidData) throw new InvalidDataException($"Invalid Brotli stream: {_decoder.LastError}.");
@@ -244,7 +246,6 @@ public sealed class BrotliStream : Stream
                 total += written;
                 if (status == OperationStatus.Done)
                 {
-                    _decoderDone = true;
                     if (_rejectTrailingData)
                     {
                         if (_bufferPos < _bufferLen) throw new InvalidDataException($"Invalid Brotli stream: {BrotliDecoderError.TrailingData}.");
@@ -259,6 +260,7 @@ public sealed class BrotliStream : Stream
                             _inputEnded = true;
                         }
                     }
+                    _decoderDone = true;
                     break;
                 }
                 if (status == OperationStatus.InvalidData) throw new InvalidDataException($"Invalid Brotli stream: {_decoder.LastError}.");
@@ -442,6 +444,12 @@ public sealed class BrotliStream : Stream
                 }
             } while (status == OperationStatus.DestinationTooSmall);
             await _stream!.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The base stream is broken; disposal must not try to finish the stream on top of it.
+            _writeFaulted = true;
+            throw;
         }
         finally
         {

@@ -60,12 +60,17 @@ public struct BrotliEncoder : IDisposable
     public OperationStatus Flush(Span<byte> destination, out int bytesWritten)
         => Core.Flush(destination, out bytesWritten);
 
-    /// <summary>Upper bound on the compressed size of <paramref name="inputSize"/> bytes for one-shot compression (reference formula).</summary>
+    /// <summary>
+    /// Upper bound on the compressed size of <paramref name="inputSize"/> bytes for one-shot compression, for any
+    /// options. The reference budgets one block of overhead per 16 KiB, which holds for its own block sizes; this
+    /// encoder emits blocks as small as 1 KiB at the smallest window, so the budget follows that instead. The bound
+    /// is therefore a little looser than the reference's, and correct at every window.
+    /// </summary>
     public static int GetMaxCompressedLength(int inputSize)
     {
         if (inputSize < 0) throw new ArgumentOutOfRangeException(nameof(inputSize));
         if (inputSize == 0) return 2;
-        long numLargeBlocks = inputSize >> 14;
+        long numLargeBlocks = inputSize >> 10;
         long overhead = 2 + (4 * numLargeBlocks) + 3 + 1;
         long result = inputSize + overhead;
         if (result > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(inputSize));

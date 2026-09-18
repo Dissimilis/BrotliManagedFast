@@ -795,6 +795,42 @@ public class PublicApiContractTests
         Assert.Equal(attemptsAfterWrite, sink.WriteAttempts);
     }
 
+    [Theory]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(16)]
+    [InlineData(24)]
+    public void TheAdvertisedSizeBoundHoldsAtEveryWindow(int windowLog)
+    {
+        // The bound has to cover the smallest blocks the encoder can emit, which the window decides. It used to
+        // budget per 16 KiB while a window of 10 produces 1 KiB blocks, so 64 KiB of noise overran it.
+        foreach (int size in new[] { 1, 1024, 16384, 65536 })
+        {
+            var data = new byte[size];
+            new Random(17).NextBytes(data);
+            int advertised = BrotliEncoder.GetMaxCompressedLength(size);
+            var destination = new byte[advertised];
+            foreach (int quality in new[] { 0, 4, 9, 11 })
+            {
+                bool fits = BrotliEncoder.TryCompress(data, destination, out int written,
+                    new BrotliCompressionOptions { Quality = quality, WindowLog = windowLog });
+                Assert.True(fits, $"{size} bytes at quality {quality}, window {windowLog} did not fit {advertised}");
+                Assert.True(written <= advertised);
+            }
+        }
+    }
+
+    [Fact]
+    public void AMatchReachingTheEndOfTheBufferDoesNotReadPastIt()
+    {
+        // The cached-distance probe compares the byte at the current best length. With a match running to the
+        // last byte of the input that byte is one past the end, so the probe has to stop first.
+        var data = new byte[4096];
+        Array.Fill(data, (byte)0x41);
+        byte[] compressed = BrotliEncoder.Compress(data, new BrotliCompressionOptions { Quality = 5, WindowLog = 10 });
+        Assert.Equal(data, BrotliDecoder.Decompress(compressed, new BrotliDecompressionOptions { MaxOutputLength = data.Length }));
+    }
+
     [Fact]
     public void DisposingTwiceIsHarmless()
     {

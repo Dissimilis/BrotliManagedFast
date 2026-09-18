@@ -824,6 +824,9 @@ internal sealed class EncoderCore : IDisposable, IZopfliSink
             if (backward <= 0 || prev < 0 || prev >= vpos || backward > _maxBackward) continue;
             int pi = Index(prev);
             if (pi < 0) continue;
+            // A match that already reaches the end of the buffer cannot be beaten, and the byte-at-bestLen
+            // test below would read one past the last valid byte.
+            if (bestLen >= maxLen) break;
             if (Unsafe.Add(ref bufRef0, pi + bestLen) != Unsafe.Add(ref bufRef0, idx + bestLen)) continue;
             if (Read32(buf, pi) != cur) continue;
             int clen = MinMatch + CommonLength(pi + MinMatch, idx + MinMatch, maxLen - MinMatch);
