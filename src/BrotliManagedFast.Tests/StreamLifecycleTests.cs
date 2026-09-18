@@ -154,6 +154,36 @@ public class StreamLifecycleTests
         public override void SetLength(long value) => throw new NotSupportedException();
         public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
 
+        /// <summary>Seeds the bytes a gated read will serve, and rewinds so reads start at the beginning.</summary>
+        public void SetReadSource(byte[] data)
+        {
+            _inner.SetLength(0);
+            _inner.Write(data, 0, data.Length);
+            _inner.Position = 0;
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            if (_first)
+            {
+                _first = false;
+                _entered.TrySetResult();
+                await _gate.Task.ConfigureAwait(false);
+            }
+            return _inner.Read(buffer, offset, count);
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_first)
+            {
+                _first = false;
+                _entered.TrySetResult();
+                await _gate.Task.ConfigureAwait(false);
+            }
+            return _inner.Read(buffer.Span);
+        }
+
         public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
 
         public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
@@ -348,14 +378,21 @@ public class StreamLifecycleTests
         using (var enc = new BrotliStream(ms, CompressionMode.Compress, leaveOpen: true)) enc.Write(data, 0, data.Length);
         ms.Position = 0;
 
-        var readBase = new AsyncOnlyStream();
-        readBase.SetReadSource(ms.ToArray());
-        await using var dec = new BrotliStream(readBase, CompressionMode.Decompress, leaveOpen: true);
+        // The gate holds the first base-stream read open, so the overlap is deterministic rather than a race
+        // that the first read can win on a fast machine.
+        var gated = new GatedOnceStream();
+        gated.SetReadSource(ms.ToArray());
+        await using var dec = new BrotliStream(gated, CompressionMode.Decompress, leaveOpen: true);
         var buf1 = new byte[4096];
         var buf2 = new byte[4096];
 
         Task<int> first = dec.ReadAsync(buf1).AsTask();
+        await gated.FirstCallEntered.WaitAsync(TimeSpan.FromMilliseconds(TimeoutMs));
+        Assert.False(first.IsCompleted);
+
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await dec.ReadAsync(buf2).AsTask());
+
+        gated.ReleaseGate();
         int n1 = await first.WaitAsync(TimeSpan.FromMilliseconds(TimeoutMs));
         Assert.True(n1 > 0);
 
