@@ -28,6 +28,11 @@ public sealed class BrotliStream : Stream
     private bool _decoderDone;
     private readonly bool _rejectTrailingData;
     private bool _wroteFinal;
+    /// <summary>
+    /// Set when writing to the base stream has already failed. Disposal then skips the final block rather than
+    /// attempting I/O it knows is doomed, which would throw a second, later exception over the first one.
+    /// </summary>
+    private bool _writeFaulted;
     private bool _disposed;
     private int _activeAsync;
 
@@ -320,14 +325,23 @@ public sealed class BrotliStream : Stream
 #endif
     {
         EnsureCompress();
-        while (true)
+        try
         {
-            OperationStatus status = _encoder.Compress(source, _buffer, out int consumed, out int written, isFinalBlock: false);
-            source = source.Slice(consumed);
-            if (written > 0) _stream!.Write(_buffer, 0, written);
-            if (status == OperationStatus.NeedMoreData && source.IsEmpty) return;
-            if (status == OperationStatus.DestinationTooSmall || !source.IsEmpty) continue;
-            return;
+            while (true)
+            {
+                OperationStatus status = _encoder.Compress(source, _buffer, out int consumed, out int written, isFinalBlock: false);
+                source = source.Slice(consumed);
+                if (written > 0) _stream!.Write(_buffer, 0, written);
+                if (status == OperationStatus.NeedMoreData && source.IsEmpty) return;
+                if (status == OperationStatus.DestinationTooSmall || !source.IsEmpty) continue;
+                return;
+            }
+        }
+        catch
+        {
+            // The base stream is broken; disposal must not try to finish the stream on top of it.
+            _writeFaulted = true;
+            throw;
         }
     }
 
@@ -365,6 +379,12 @@ public sealed class BrotliStream : Stream
                 return;
             }
         }
+        catch
+        {
+            // The base stream is broken; disposal must not try to finish the stream on top of it.
+            _writeFaulted = true;
+            throw;
+        }
         finally
         {
             ExitAsync();
@@ -383,13 +403,21 @@ public sealed class BrotliStream : Stream
         EnsureNotDisposed();
         if (_mode != CompressionMode.Compress) return;
         if (_wroteFinal) return;
-        OperationStatus status;
-        do
+        try
         {
-            status = _encoder.Flush(_buffer, out int written);
-            if (written > 0) _stream!.Write(_buffer, 0, written);
-        } while (status == OperationStatus.DestinationTooSmall);
-        _stream!.Flush();
+            OperationStatus status;
+            do
+            {
+                status = _encoder.Flush(_buffer, out int written);
+                if (written > 0) _stream!.Write(_buffer, 0, written);
+            } while (status == OperationStatus.DestinationTooSmall);
+            _stream!.Flush();
+        }
+        catch
+        {
+            _writeFaulted = true;
+            throw;
+        }
     }
 
     public override async Task FlushAsync(CancellationToken cancellationToken)
@@ -423,33 +451,49 @@ public sealed class BrotliStream : Stream
 
     private void WriteFinal()
     {
-        if (_wroteFinal) return;
+        if (_wroteFinal || _writeFaulted) return;
         _wroteFinal = true;
-        OperationStatus status;
-        do
+        try
         {
-            status = _encoder.Compress(ReadOnlySpan<byte>.Empty, _buffer, out _, out int written, isFinalBlock: true);
-            if (written > 0) _stream!.Write(_buffer, 0, written);
-        } while (status == OperationStatus.DestinationTooSmall);
+            OperationStatus status;
+            do
+            {
+                status = _encoder.Compress(ReadOnlySpan<byte>.Empty, _buffer, out _, out int written, isFinalBlock: true);
+                if (written > 0) _stream!.Write(_buffer, 0, written);
+            } while (status == OperationStatus.DestinationTooSmall);
+        }
+        catch
+        {
+            _writeFaulted = true;
+            throw;
+        }
     }
 
     private async ValueTask WriteFinalAsync()
     {
-        if (_wroteFinal) return;
+        if (_wroteFinal || _writeFaulted) return;
         _wroteFinal = true;
-        OperationStatus status;
-        do
+        try
         {
-            status = _encoder.Compress(ReadOnlySpan<byte>.Empty, _buffer, out _, out int written, isFinalBlock: true);
-            if (written > 0)
+            OperationStatus status;
+            do
             {
+                status = _encoder.Compress(ReadOnlySpan<byte>.Empty, _buffer, out _, out int written, isFinalBlock: true);
+                if (written > 0)
+                {
 #if NETSTANDARD2_0
-                await _stream!.WriteAsync(_buffer, 0, written).ConfigureAwait(false);
+                    await _stream!.WriteAsync(_buffer, 0, written).ConfigureAwait(false);
 #else
-                await _stream!.WriteAsync(_buffer.AsMemory(0, written)).ConfigureAwait(false);
+                    await _stream!.WriteAsync(_buffer.AsMemory(0, written)).ConfigureAwait(false);
 #endif
-            }
-        } while (status == OperationStatus.DestinationTooSmall);
+                }
+            } while (status == OperationStatus.DestinationTooSmall);
+        }
+        catch
+        {
+            _writeFaulted = true;
+            throw;
+        }
     }
 
     // ------------------------------------------------------------------ dispose

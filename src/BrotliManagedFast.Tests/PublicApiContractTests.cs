@@ -735,6 +735,66 @@ public class PublicApiContractTests
         Assert.Equal(0, written);
     }
 
+    /// <summary>A base stream whose writes always fail, and which counts how often they were attempted.</summary>
+    private sealed class FailingWriteStream : Stream
+    {
+        public int WriteAttempts;
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            WriteAttempts++;
+            throw new IOException("base stream is broken");
+        }
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            WriteAttempts++;
+            return Task.FromException(new IOException("base stream is broken"));
+        }
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            WriteAttempts++;
+            return new ValueTask(Task.FromException(new IOException("base stream is broken")));
+        }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void DisposalDoesNotRetryAWriteThatAlreadyFailed()
+    {
+        // Once the base stream has rejected a write, finishing the stream on top of it can only produce a
+        // second, later exception that hides the first. Disposal must release resources and stop.
+        byte[] data = Sample(100_000, seed: 30);
+
+        var sink = new FailingWriteStream();
+        var stream = new BrotliStream(sink, new BrotliCompressionOptions { Quality = 5 }, leaveOpen: true);
+        Assert.Throws<IOException>(() => stream.Write(data, 0, data.Length));
+        int attemptsAfterWrite = sink.WriteAttempts;
+
+        stream.Dispose();
+        Assert.Equal(attemptsAfterWrite, sink.WriteAttempts);
+    }
+
+    [Fact]
+    public async Task AsyncDisposalDoesNotRetryAWriteThatAlreadyFailed()
+    {
+        byte[] data = Sample(100_000, seed: 31);
+
+        var sink = new FailingWriteStream();
+        var stream = new BrotliStream(sink, new BrotliCompressionOptions { Quality = 5 }, leaveOpen: true);
+        await Assert.ThrowsAsync<IOException>(async () => await stream.WriteAsync(data.AsMemory()));
+        int attemptsAfterWrite = sink.WriteAttempts;
+
+        await stream.DisposeAsync();
+        Assert.Equal(attemptsAfterWrite, sink.WriteAttempts);
+    }
+
     [Fact]
     public void DisposingTwiceIsHarmless()
     {
