@@ -10,7 +10,7 @@ namespace BrotliManagedFast;
 public struct BrotliEncoder : IDisposable
 {
     private EncoderCore? _core;
-    private readonly BrotliCompressionOptions _options;
+    private readonly BrotliCompressionOptions? _options;
 
     /// <summary>Creates an encoder with explicit quality (0..11) and window (10..24).</summary>
     public BrotliEncoder(int quality, int window)
@@ -18,7 +18,7 @@ public struct BrotliEncoder : IDisposable
     {
     }
 
-    /// <summary>Creates an encoder from options.</summary>
+    /// <summary>Creates an encoder from options. A default-constructed value uses the default options.</summary>
     public BrotliEncoder(BrotliCompressionOptions? options)
     {
         _options = (options ?? BrotliCompressionOptions.Default).Clone();
@@ -26,7 +26,9 @@ public struct BrotliEncoder : IDisposable
         _core = null;
     }
 
-    private EncoderCore Core => _core ??= new EncoderCore(_options);
+    // A default-constructed value has no options: give it the defaults rather than a null reference,
+    // which is what the decoder does and what a struct's default value has to tolerate.
+    private EncoderCore Core => _core ??= new EncoderCore(_options ?? BrotliCompressionOptions.Default);
 
     /// <summary>Releases pooled buffers.</summary>
     public void Dispose()
@@ -70,7 +72,7 @@ public struct BrotliEncoder : IDisposable
         return (int)result;
     }
 
-    /// <summary>One-shot compression with default options. Returns false if <paramref name="destination"/> is too small.</summary>
+    /// <summary>One-shot compression with default options. Returns false, with <paramref name="bytesWritten"/> zero, if <paramref name="destination"/> is too small.</summary>
     public static bool TryCompress(ReadOnlySpan<byte> source, Span<byte> destination, out int bytesWritten)
         => TryCompress(source, destination, out bytesWritten, null);
 
@@ -85,7 +87,13 @@ public struct BrotliEncoder : IDisposable
         if (options.SizeHint == 0) options.SizeHint = source.Length;
         using var enc = new BrotliEncoder(options);
         OperationStatus status = enc.Compress(source, destination, out int consumed, out bytesWritten, isFinalBlock: true);
-        return status == OperationStatus.Done && consumed == source.Length;
+        if (status != OperationStatus.Done || consumed != source.Length)
+        {
+            // A partial stream is not a usable result, so do not leave a count behind that a caller might trust.
+            bytesWritten = 0;
+            return false;
+        }
+        return true;
     }
 
     /// <summary>Compresses <paramref name="source"/> into a new array.</summary>

@@ -30,6 +30,15 @@ public static class BrotliParallel
         if (chunkSize < 1 << 16) throw new ArgumentOutOfRangeException(nameof(chunkSize), "Chunk size must be at least 64 KiB.");
         options = (options ?? BrotliCompressionOptions.Default).Clone();
         options.Validate();
+        // Rejected whatever the input size, so the same call does not succeed on a small input and fail on a
+        // large one: chunks are compressed independently, and a prefix dictionary only applies to the first.
+        if (options.Dictionary is not null)
+        {
+            throw new ArgumentException(
+                "Parallel compression cannot use a prefix dictionary: chunks are compressed independently, so the dictionary would apply to the first chunk only. Use BrotliEncoder for dictionary compression.",
+                nameof(options));
+        }
+        bool wantFragment = options.Concatenable;
         if (source.Length <= chunkSize || maxDegreeOfParallelism == 1)
         {
             BrotliEncoder.Compress(source.Span, output, options);
@@ -47,6 +56,13 @@ public static class BrotliParallel
             int len = Math.Min(chunkSize, source.Length - start);
             fragments[i] = BrotliEncoder.Compress(source.Span.Slice(start, len), options);
         });
+        if (wantFragment)
+        {
+            // The caller asked for a joinable fragment, so the result must stay one: same shape as the
+            // single-chunk path above, which never appends a terminator either.
+            BrotliConcat.Join(output, fragments);
+            return;
+        }
         BrotliConcat.Concatenate(output, fragments);
     }
 }

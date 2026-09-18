@@ -55,7 +55,7 @@ public static class BrotliConcat
         return (headerBits + 6 + 7) >> 3;
     }
 
-    /// <summary>Concatenates fragments into <paramref name="output"/>.</summary>
+    /// <summary>Concatenates fragments into <paramref name="output"/> and finishes the stream.</summary>
     public static void Concatenate(IBufferWriter<byte> output, IReadOnlyList<ReadOnlyMemory<byte>> fragments)
     {
         if (output is null) throw new ArgumentNullException(nameof(output));
@@ -66,6 +66,22 @@ public static class BrotliConcat
             output.Advance(1);
             return;
         }
+        Join(output, fragments);
+        Span<byte> terminator = output.GetSpan(1);
+        terminator[0] = Terminator;
+        output.Advance(1);
+    }
+
+    /// <summary>
+    /// Joins fragments into <paramref name="output"/> without finishing the stream, so the result is itself a
+    /// concatenable fragment. Append <see cref="Terminator"/>, or pass it to <c>Concatenate</c> again,
+    /// to complete it.
+    /// </summary>
+    public static void Join(IBufferWriter<byte> output, IReadOnlyList<ReadOnlyMemory<byte>> fragments)
+    {
+        if (output is null) throw new ArgumentNullException(nameof(output));
+        if (fragments is null) throw new ArgumentNullException(nameof(fragments));
+        if (fragments.Count == 0) return;
         int firstWindow = -1;
         bool firstLarge = false;
         for (int i = 0; i < fragments.Count; i++)
@@ -86,9 +102,6 @@ public static class BrotliConcat
             body.CopyTo(dst);
             output.Advance(body.Length);
         }
-        Span<byte> t = output.GetSpan(1);
-        t[0] = Terminator;
-        output.Advance(1);
     }
 
     /// <summary>Concatenates fragments into a new array.</summary>

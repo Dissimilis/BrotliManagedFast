@@ -26,6 +26,7 @@ public sealed class BrotliStream : Stream
     private int _bufferLen;
     private bool _inputEnded;
     private bool _decoderDone;
+    private readonly bool _rejectTrailingData;
     private bool _wroteFinal;
     private bool _disposed;
     private int _activeAsync;
@@ -69,6 +70,7 @@ public sealed class BrotliStream : Stream
             case CompressionMode.Decompress:
                 if (!stream.CanRead) throw new ArgumentException("Stream is not readable.", nameof(stream));
                 _decoder = new BrotliDecoder(decompressionOptions);
+                _rejectTrailingData = decompressionOptions?.RejectTrailingData ?? false;
                 _pool = decompressionOptions?.Pool ?? ArrayPool<byte>.Shared;
                 break;
             default:
@@ -149,6 +151,7 @@ public sealed class BrotliStream : Stream
             if (status == OperationStatus.Done)
             {
                 _decoderDone = true;
+                CheckForTrailingData();
                 break;
             }
             if (status == OperationStatus.InvalidData) throw new InvalidDataException($"Invalid Brotli stream: {_decoder.LastError}.");
@@ -179,18 +182,34 @@ public sealed class BrotliStream : Stream
         return total;
     }
 
+    /// <summary>
+    /// The decoder only sees trailing bytes that happen to sit in the same buffer as the end of the stream.
+    /// When the caller asked for strict detection, look past the end: whatever is left unread in the buffer,
+    /// and failing that one more read of the base stream.
+    /// </summary>
+    private void CheckForTrailingData()
+    {
+        if (!_rejectTrailingData) return;
+        if (_bufferPos < _bufferLen) throw new InvalidDataException($"Invalid Brotli stream: {BrotliDecoderError.TrailingData}.");
+        if (_inputEnded) return;
+        int extra = _stream!.Read(_buffer, 0, _buffer.Length);
+        if (extra > 0) throw new InvalidDataException($"Invalid Brotli stream: {BrotliDecoderError.TrailingData}.");
+        _inputEnded = true;
+    }
+
     private bool FillInputBuffer()
     {
         if (_inputEnded) return false;
         if (_bufferPos < _bufferLen) return true;
         _bufferPos = 0;
-        _bufferLen = _stream!.Read(_buffer, 0, _buffer.Length);
-        if (_bufferLen <= 0)
+        _bufferLen = 0;   // nothing in the buffer is valid until the read returns; a throwing read must not replay it
+        int read = _stream!.Read(_buffer, 0, _buffer.Length);
+        if (read <= 0)
         {
-            _bufferLen = 0;
             _inputEnded = true;
             return false;
         }
+        _bufferLen = read;
         return true;
     }
 
@@ -218,7 +237,25 @@ public sealed class BrotliStream : Stream
                 _bufferPos += consumed;
                 destination = destination.Slice(written);
                 total += written;
-                if (status == OperationStatus.Done) { _decoderDone = true; break; }
+                if (status == OperationStatus.Done)
+                {
+                    _decoderDone = true;
+                    if (_rejectTrailingData)
+                    {
+                        if (_bufferPos < _bufferLen) throw new InvalidDataException($"Invalid Brotli stream: {BrotliDecoderError.TrailingData}.");
+                        if (!_inputEnded)
+                        {
+#if NETSTANDARD2_0
+                            int extra = await _stream!.ReadAsync(_buffer, 0, _buffer.Length, cancellationToken).ConfigureAwait(false);
+#else
+                            int extra = await _stream!.ReadAsync(_buffer.AsMemory(0, _buffer.Length), cancellationToken).ConfigureAwait(false);
+#endif
+                            if (extra > 0) throw new InvalidDataException($"Invalid Brotli stream: {BrotliDecoderError.TrailingData}.");
+                            _inputEnded = true;
+                        }
+                    }
+                    break;
+                }
                 if (status == OperationStatus.InvalidData) throw new InvalidDataException($"Invalid Brotli stream: {_decoder.LastError}.");
                 if (status == OperationStatus.DestinationTooSmall) { if (destination.Length == 0) break; continue; }
                 if (written > 0 && total > 0 && _bufferPos >= _bufferLen && !_inputEnded) break;
@@ -236,15 +273,21 @@ public sealed class BrotliStream : Stream
                 if (_bufferPos >= _bufferLen)
                 {
                     _bufferPos = 0;
+                    // Clear the length before awaiting: if the read is cancelled or faults, the bytes already
+                    // consumed must not stay described as valid, or the next call would feed them again.
+                    _bufferLen = 0;
 #if NETSTANDARD2_0
-                    _bufferLen = await _stream!.ReadAsync(_buffer, 0, _buffer.Length, cancellationToken).ConfigureAwait(false);
+                    int read = await _stream!.ReadAsync(_buffer, 0, _buffer.Length, cancellationToken).ConfigureAwait(false);
 #else
-                    _bufferLen = await _stream!.ReadAsync(_buffer.AsMemory(0, _buffer.Length), cancellationToken).ConfigureAwait(false);
+                    int read = await _stream!.ReadAsync(_buffer.AsMemory(0, _buffer.Length), cancellationToken).ConfigureAwait(false);
 #endif
-                    if (_bufferLen <= 0)
+                    if (read <= 0)
                     {
-                        _bufferLen = 0;
                         _inputEnded = true;
+                    }
+                    else
+                    {
+                        _bufferLen = read;
                     }
                 }
             }
